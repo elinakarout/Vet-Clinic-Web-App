@@ -1,0 +1,26 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+      - api-data:/app/data
+      - hf-cache:/root/.cache/huggingface
+    env_file:
+      - ./api/.env
+
+  client:
+    build: ./client
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./client:/app
+      - client-node-modules:/app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  api-data:
+  hf-cache:
+  client-node-modules:
