@@ -12,7 +12,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User
+from app.models import Pet, Role, User
 from app.services.security import decode_token
 
 # Relative on purpose -- no leading slash. Swagger resolves it against the docs
@@ -88,3 +88,37 @@ def require_role(*roles: Role) -> Callable[..., User]:
         return current_user
 
     return _guard
+
+
+def get_owned_pet(
+    pet_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Pet:
+    """Load a pet the caller is allowed to touch, or raise 404/403. (Phase 3)
+
+    PROJECT_PLAN.md section 3 of Phase 3 specifies this as a plain helper called
+    from every pet endpoint. It is a *dependency* instead, for one reason: a
+    helper you must remember to call is exactly the thing that gets forgotten
+    when Phase 4 adds an endpoint. Declared as `pet: Pet = Depends(get_owned_pet)`
+    the check cannot be skipped without also losing the pet.
+
+    The comparison is against client_profile.id, never user.id. pets.owner_id is
+    a client_profiles.id (see the docstring on models.Pet) -- and user ids and
+    profile ids drift apart the moment one admin or vet exists, so the wrong one
+    reads as "works on my machine, leaks in production".
+    """
+    pet = db.get(Pet, pet_id)
+    if pet is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pet not found")
+
+    if current_user.role is Role.CLIENT:
+        profile = current_user.client_profile
+        # /auth/register always creates the profile alongside the user, so this
+        # is unreachable through the API. Guarded anyway: a 403 is the right
+        # answer for "owns no pets", and an AttributeError would be a 500.
+        if profile is None or pet.owner_id != profile.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your pet")
+
+    # VET and ADMIN fall through: clinical staff see every patient.
+    return pet
