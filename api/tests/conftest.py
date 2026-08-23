@@ -3,10 +3,13 @@
 from datetime import date, time
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.database import Base
+from app.database import Base, get_db
+from app.main import app
 
 # Importing the package registers all eleven tables on Base.metadata. Without
 # it create_all() below silently creates nothing.
@@ -26,7 +29,14 @@ from app.services.security import hash_password
 @pytest.fixture()
 def db_session():
     engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        # ":memory:" is scoped to a *connection*, and the default for SQLite is
+        # SingletonThreadPool -- one connection per thread. TestClient runs the
+        # app in its own portal thread, which would therefore get a second,
+        # empty database with no tables in it. StaticPool pins the engine to a
+        # single shared connection so both threads see the same data.
+        poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -89,3 +99,57 @@ def seeded_db(db_session):
         "pet_a": client_a.client_profile.pets[0],
         "pet_b": client_b.client_profile.pets[0],
     }
+
+
+@pytest.fixture()
+def api_client(db_session):
+    """A TestClient wired to the *same* in-memory database as db_session.
+
+    get_db hands back the test's own Session rather than opening a new one: two
+    Sessions sharing one connection interleave their BEGIN/COMMIT, so a request
+    committing would also commit whatever the test had pending. Deliberately
+    does not close the session -- db_session owns its lifetime.
+
+    Named api_client, not client: in this codebase a "client" is a pet owner.
+    """
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture()
+def admin_user(db_session):
+    """seeded_db has no admin, and /auth/staff needs one. Password: admin1234.
+
+    ADMIN has no profile table, so this is a bare User row -- same as seed.py.
+    """
+    user = User(
+        email="admin@test.local",
+        hashed_password=hash_password("admin1234"),
+        role=Role.ADMIN,
+    )
+    db_session.add(user)
+    db_session.commit()
+    return user
+
+
+@pytest.fixture()
+def login(api_client):
+    """Log in over HTTP and return an Authorization header dict."""
+
+    def _login(email: str, password: str) -> dict[str, str]:
+        response = api_client.post(
+            # data=, not json=: the OAuth2 password flow is form-encoded, which
+            # is exactly why python-multipart is a hard dependency.
+            "/auth/login",
+            data={"username": email, "password": password},
+        )
+        assert response.status_code == 200, response.text
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    return _login
