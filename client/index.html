@@ -4,7 +4,26 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>client</title>
+    <meta name="description" content="Paws & Claws Veterinary Clinic — manage your pets and book appointments." />
+    <meta name="theme-color" content="#0d9488" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)" />
+    <title>Paws &amp; Claws Veterinary Clinic</title>
+    <script>
+      // Set the theme before first paint. Doing this in React instead would
+      // render one frame in the wrong colours on every load.
+      (function () {
+        try {
+          var saved = localStorage.getItem('vetclinic.theme');
+          var dark =
+            saved === 'dark' ||
+            (saved === null &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', dark);
+        } catch (e) {
+          /* storage blocked — fall through to the light default */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
