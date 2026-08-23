@@ -212,3 +212,24 @@ class MyProfileUpdate(BaseModel):
         if not self.model_fields_set:
             raise ValueError("provide at least one field to update")
         return self
+
+
+class VetOut(BaseModel):
+    """A vet as a client sees them when choosing who to book with. (Phase 4)
+
+    Deliberately not ProfileOut: that shape carries `email` and `user_id`, and
+    GET /vets is readable by every signed-in client. A pet owner picking a
+    surgeon needs a name and a specialty, not the clinic's staff directory.
+    `license_no` is likewise absent -- it is a regulatory identifier, not a
+    selling point, and nothing in the booking flow reads it.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    full_name: str
+    specialty: str | None = None
+
+    @classmethod
+    def from_profile(cls, profile) -> "VetOut":
+        return cls(id=profile.id, full_name=profile.full_name, specialty=profile.specialty)

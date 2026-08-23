@@ -1,4 +1,4 @@
-"""Shared FastAPI dependencies: get_current_user, require_role. (Phase 2)
+"""Shared FastAPI dependencies: get_current_user, require_role. (Phase 2/4)
 
 This is where a token becomes a User row. Every later phase's ownership check
 starts from get_current_user, so the rules here are load-bearing.
@@ -12,7 +12,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Pet, Role, User
+from app.models import Appointment, Pet, Role, User
 from app.services.security import decode_token
 
 # Relative on purpose -- no leading slash. Swagger resolves it against the docs
@@ -122,3 +122,44 @@ def get_owned_pet(
 
     # VET and ADMIN fall through: clinical staff see every patient.
     return pet
+
+
+def get_owned_appointment(
+    appointment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Appointment:
+    """Load an appointment the caller may touch, or raise 404/403. (Phase 4)
+
+    A dependency for the same reason get_owned_pet is one, and this is the phase
+    that docstring was warning about: a helper you must remember to call is what
+    gets forgotten when a route is added in a hurry. Declared as
+    `appointment: Appointment = Depends(get_owned_appointment)` there is no other
+    path to an Appointment row in routers/appointments.py.
+
+    Two differences from get_owned_pet, both easy to get wrong:
+
+    * **The client hop is one longer.** A pet's owner is `pet.owner_id`; an
+      appointment's is `appointment.pet.owner_id`. Compared against
+      `client_profile.id`, never `user.id` -- see models.Pet.
+
+    * **A VET is scoped to their own appointments**, where get_owned_pet lets any
+      vet read any patient. Clinical need justifies opening a patient's record;
+      it does not justify reading a colleague's diary. ADMIN is the role that
+      sees everyone's.
+    """
+    appointment = db.get(Appointment, appointment_id)
+    if appointment is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
+
+    if current_user.role is Role.CLIENT:
+        profile = current_user.client_profile
+        if profile is None or appointment.pet.owner_id != profile.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your appointment")
+    elif current_user.role is Role.VET:
+        profile = current_user.vet_profile
+        if profile is None or appointment.vet_id != profile.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your appointment")
+
+    # ADMIN falls through.
+    return appointment
