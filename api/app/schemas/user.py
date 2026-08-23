@@ -137,3 +137,78 @@ class UserOut(BaseModel):
             created_at=user.created_at,
             full_name=profile.full_name if profile is not None else None,
         )
+
+
+class ProfileOut(BaseModel):
+    """A client_profiles or vet_profiles row, flattened into one shape.
+
+    Two tables, one response model, with the half that does not apply left null:
+    a client has phone/address, a vet has specialty/license_no. A discriminated
+    union would be tidier on paper, but the frontend reads `role` anyway and a
+    single stable shape keeps the TypeScript types in Phase 5 to one interface.
+
+    An ADMIN is representable here but never returned -- admins have no profile
+    row at all, so /me/profile answers 404 for them.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    role: Role
+    email: str
+    full_name: str
+    # CLIENT only
+    phone: str | None = None
+    address: str | None = None
+    # VET only
+    specialty: str | None = None
+    license_no: str | None = None
+
+    @classmethod
+    def from_user(cls, user: User) -> "ProfileOut":
+        """Build from whichever profile the user has. Caller checks for None first."""
+        profile = user.client_profile or user.vet_profile
+        if profile is None:  # pragma: no cover - routers reject this earlier
+            raise ValueError("user has no profile row")
+        return cls(
+            id=profile.id,
+            user_id=user.id,
+            role=user.role,
+            email=user.email,
+            full_name=profile.full_name,
+            phone=getattr(profile, "phone", None),
+            address=getattr(profile, "address", None),
+            specialty=getattr(profile, "specialty", None),
+            license_no=getattr(profile, "license_no", None),
+        )
+
+
+# Which fields each profile table actually has. The router uses these to answer
+# 422 when a client tries to set `specialty` -- a field that exists in this
+# schema but has nowhere to go on their row.
+CLIENT_PROFILE_FIELDS = frozenset({"full_name", "phone", "address"})
+VET_PROFILE_FIELDS = frozenset({"full_name", "specialty", "license_no"})
+
+
+class MyProfileUpdate(BaseModel):
+    """PATCH /me/profile. One shape for both profile types; the router filters.
+
+    Nothing here can change the account itself: no email, no password, no role,
+    no is_active. Those are separate operations with separate rules, and
+    extra="forbid" makes an attempt at one a 422 rather than a silent no-op.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=40)
+    address: str | None = None
+    specialty: str | None = Field(default=None, max_length=120)
+    license_no: str | None = Field(default=None, max_length=60)
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "MyProfileUpdate":
+        if not self.model_fields_set:
+            raise ValueError("provide at least one field to update")
+        return self
