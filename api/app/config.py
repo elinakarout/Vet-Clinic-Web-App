@@ -4,7 +4,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        # A .env is a shared file -- other tools put their own keys in it. Without
+        # this, one unrelated line (an OPENROUTER_API_KEY, say) makes Settings()
+        # raise at import and takes down the app, alembic and the whole test
+        # suite at once. Note this is the opposite of the deliberate
+        # extra="forbid" on the request schemas: there, an unexpected field is an
+        # attacker smuggling "role": "ADMIN"; here it is somebody else's config.
+        extra="ignore",
+    )
 
     database_url: str = "sqlite:///./data/dev.db"
     secret_key: str
@@ -28,6 +38,26 @@ class Settings(BaseSettings):
     # request cannot ask the server to walk ten years of availability.
     max_slot_range_days: int = 31
     max_booking_horizon_days: int = 365
+
+    # RAG / knowledge base (Phase 6) ---------------------------------------
+    # Authored clinic Markdown is tracked source, so it lives OUTSIDE data/:
+    # .gitignore excludes api/data/, and docker-compose mounts the api-data
+    # volume over /app/data, which would hide it from the container entirely.
+    # Fetched text and the vector store are derived, and stay under data/.
+    # Paths are relative to the CWD the app runs from (api/), like database_url.
+    clinic_knowledge_dir: str = "./knowledge/clinic"
+    external_knowledge_dir: str = "./data/knowledge/external"
+    chroma_path: str = "./data/chroma"
+    chroma_collection: str = "clinic_knowledge"
+    retrieval_k: int = 5
+    # Cosine similarity floor. Below this a passage is dropped, so a nonsense
+    # query returns [] rather than the five least-bad chunks. Measured, not
+    # guessed: over 12 in-domain and 10 out-of-domain queries against the real
+    # store, in-domain top-1 scored 0.501-0.773 and out-of-domain 0.071-0.262.
+    # 0.35 sits inside that gap, 0.09 above the worst false positive and 0.15
+    # below the weakest true one. Re-measure if the knowledge base changes
+    # shape -- PHASE_6.md records the numbers and the script that produced them.
+    retrieval_min_score: float = 0.35
 
     anthropic_api_key: str = ""
     cors_origins: list[str] = ["http://localhost:5173"]
