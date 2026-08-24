@@ -7,6 +7,9 @@ services:
       - ./api:/app
       - api-data:/app/data
       - hf-cache:/root/.cache/huggingface
+      # Chroma's ONNX embedder unpacks here, NOT into hf-cache. Without this
+      # volume every container restart re-downloads ~80 MB (Phase 6).
+      - chroma-cache:/root/.cache/chroma
     env_file:
       - ./api/.env
 
@@ -27,4 +30,5 @@ services:
 volumes:
   api-data:
   hf-cache:
+  chroma-cache:
   client-node-modules:

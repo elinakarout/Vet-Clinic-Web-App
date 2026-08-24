@@ -19,3 +19,6 @@ dist/
 .DS_Store
 
 *.md
+# ...except the clinic's knowledge base, which is authored source, not a
+# note. Phase 6's RAG store is rebuilt from these files.
+!api/knowledge/clinic/*.md
