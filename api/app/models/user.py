@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.chat import Conversation
     from app.models.pet import ClientProfile, VetProfile
 
 
@@ -45,6 +46,12 @@ class User(Base):
     )
     vet_profile: Mapped[VetProfile | None] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    # Phase 7. Cascades: deleting an account takes its chat history with it,
+    # which is the right answer for a transcript and the wrong one for a pet --
+    # see pets.py, where clinical history blocks the delete instead.
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

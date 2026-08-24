@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 
-# Importing the package registers all eleven tables on Base.metadata. Without
+# Importing the package registers all thirteen tables on Base.metadata. Without
 # it create_all() below silently creates nothing.
 from app import models  # noqa: F401  (must precede create_all)
 from app.models import (

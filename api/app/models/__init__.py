@@ -15,6 +15,7 @@ from app.models.appointment import (
     Vaccination,
     VetAvailability,
 )
+from app.models.chat import ChatMessage, ChatRole, Conversation
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, SourceType
 from app.models.pet import ClientProfile, Pet, Sex, VetProfile
 from app.models.user import Role, User
@@ -23,7 +24,10 @@ __all__ = [
     "ACTIVE_APPOINTMENT_STATUSES",
     "Appointment",
     "AppointmentStatus",
+    "ChatMessage",
+    "ChatRole",
     "ClientProfile",
+    "Conversation",
     "KnowledgeChunk",
     "KnowledgeDocument",
     "MedicalRecord",

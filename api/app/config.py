@@ -59,8 +59,64 @@ class Settings(BaseSettings):
     # shape -- PHASE_6.md records the numbers and the script that produced them.
     retrieval_min_score: float = 0.35
 
-    anthropic_api_key: str = ""
+    # Chat / LLM (Phase 7) -------------------------------------------------
+    # Google AI Studio's OpenAI-compatible endpoint. PROJECT_PLAN.md sec 7 assumed
+    # the anthropic SDK and claude-opus-5; this project runs on Gemini instead --
+    # see PHASE_7.md decision 1. The gateway is a setting rather than a literal
+    # because OpenRouter speaks the identical /chat/completions schema, so moving
+    # between the two is these three lines and no code at all.
+    chat_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    # gemini-3.5-flash, not the newer 3.7: the free tier caps 3.7-flash at
+    # **20 requests per day** (measured, PHASE_7.md), and one tool-using chat
+    # turn costs two to four of them. 3.5-flash has a far larger daily allowance
+    # and throttles at 5/minute instead. The quota is per-model, so changing this
+    # line gets a fresh bucket.
+    chat_model: str = "gemini-3.5-flash"
+    # Two names for the same slot, because the two gateways issue different keys
+    # and .env should not have to be rewritten to switch. Resolution order is in
+    # the chat_api_key property below. Note that until these were declared,
+    # extra="ignore" above meant an OPENROUTER_API_KEY line in .env was read by
+    # nothing at all.
+    google_ai_studio_api_key: str = ""
+    openrouter_api_key: str = ""
+    chat_max_tokens: int = 2048
+    # Low, not zero. This is a booking assistant quoting prices and policy out of
+    # a knowledge base; invention is the failure mode, not dullness.
+    chat_temperature: float = 0.3
+    # None means the field is omitted from the request entirely. Not every model
+    # behind an OpenAI-compatible gateway accepts reasoning_effort, and sending it
+    # to one that does not is a 400 rather than a graceful ignore.
+    chat_reasoning_effort: str | None = None
+    # PROJECT_PLAN.md sec 7 "Cost and latency": cap history so a long chat does not
+    # grow unboundedly. Counted in persisted turns, user and assistant alike.
+    chat_history_limit: int = 20
+    # How many times the model may call tools and be asked again within one turn.
+    # "look up the pet, check the schedule, find slots, propose" is four, so this
+    # leaves room without letting a confused model loop until the bill notices.
+    chat_max_tool_iterations: int = 6
+    chat_request_timeout_seconds: float = 90.0
+    # Per user, per process. Deliberately crude -- Phase 9 owns real rate
+    # limiting; this exists so a re-render loop in the frontend cannot burn a
+    # day's free-tier quota before anyone notices.
+    chat_rate_limit_per_minute: int = 10
+    # The knowledge base says "the clinic" and gives no phone number anywhere, on
+    # purpose. The system prompt must not invent either, so both are settings and
+    # the defaults stay vague.
+    clinic_name: str = "the clinic"
+    clinic_phone: str = ""
+
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    @property
+    def chat_api_key(self) -> str:
+        """The key for whichever gateway chat_base_url points at.
+
+        Google AI Studio first because that is the default base URL. Falling
+        through to OpenRouter means a .env that already has one key works without
+        being edited -- and an empty string here is what routers/chat.py turns
+        into a clean 503 instead of a 401 from the provider.
+        """
+        return self.google_ai_studio_api_key or self.openrouter_api_key
 
 
 settings = Settings()
