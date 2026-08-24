@@ -1,4 +1,4 @@
-"""Shared FastAPI dependencies: get_current_user, require_role. (Phase 2/4)
+"""Shared FastAPI dependencies: get_current_user, require_role. (Phase 2/4/7)
 
 This is where a token becomes a User row. Every later phase's ownership check
 starts from get_current_user, so the rules here are load-bearing.
@@ -12,7 +12,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Appointment, Pet, Role, User
+from app.models import Appointment, Conversation, Pet, Role, User
 from app.services.security import decode_token
 
 # Relative on purpose -- no leading slash. Swagger resolves it against the docs
@@ -163,3 +163,30 @@ def get_owned_appointment(
 
     # ADMIN falls through.
     return appointment
+
+
+def get_owned_conversation(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Conversation:
+    """Load a chat thread the caller owns, or raise 404/403. (Phase 7)
+
+    The third of these, and a dependency for the same reason the first two are:
+    a check you have to remember to call is the one that gets forgotten when a
+    route is added in a hurry.
+
+    Simpler than its siblings in one way and stricter in another. Simpler,
+    because a conversation hangs off ``users.id`` directly -- there is no profile
+    hop, and this is one of the few places in the codebase where ``user.id`` is
+    genuinely the right column. Stricter, because there is **no staff bypass**:
+    a vet may read any patient's record, but nobody reads somebody else's
+    conversation with the assistant. An admin who needs a transcript has the
+    database.
+    """
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+    if conversation.user_id != current_user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your conversation")
+    return conversation

@@ -9,7 +9,10 @@ pyjwt>=2.10,<3         # >=2.10 enforces a string `sub` claim; see PHASE_2.md
 passlib[bcrypt]
 bcrypt<4.1              # passlib 1.7.4's bcrypt backend breaks on 4.1+
 python-multipart
-anthropic
+# anthropic            # NOT installed: PROJECT_PLAN.md sec 7 assumed claude-opus-5
+#                      # via this SDK. The project runs on Gemini through an
+#                      # OpenAI-compatible endpoint instead, which httpx below
+#                      # already covers. See PHASE_7.md decision 1.
 chromadb>=1.0,<2       # 1.x for configuration={"hnsw": ...}; see PHASE_6.md
 # sentence-transformers  # NOT installed: chromadb bundles the same model
 #                        # (all-MiniLM-L6-v2) as ONNX via onnxruntime, ~50 MB

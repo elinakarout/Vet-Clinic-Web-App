@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import appointments, auth, pets, vets
+from app.routers import appointments, auth, chat, pets, vets
 
 app = FastAPI(title="Vet Clinic API")
 
@@ -21,6 +21,7 @@ app.include_router(pets.router)
 app.include_router(pets.me_router)
 app.include_router(appointments.router)
 app.include_router(vets.router)
+app.include_router(chat.router)
 
 
 @app.get("/health")
