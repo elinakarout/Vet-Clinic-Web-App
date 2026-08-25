@@ -211,3 +211,103 @@ export interface AppointmentListParams {
   limit?: number;
   offset?: number;
 }
+
+// --- Chat ------------------------------------------------------------------
+//
+// Mirrors api/app/schemas/chat.py. Two things here are unlike the rest of this
+// file: the proposals carry `pet_name`/`vet_name` (so a chat card needs no join
+// against GET /pets and GET /vets), and `ChatEvent` describes a *stream* rather
+// than a response body — see api/client.ts:apiStream.
+
+export const ChatRole = {
+  USER: 'USER',
+  ASSISTANT: 'ASSISTANT',
+} as const;
+export type ChatRole = (typeof ChatRole)[keyof typeof ChatRole];
+
+export const ProposalKind = {
+  APPOINTMENT: 'appointment',
+  CANCELLATION: 'cancellation',
+} as const;
+export type ProposalKind = (typeof ProposalKind)[keyof typeof ProposalKind];
+
+/**
+ * A booking the assistant suggests. **Nothing has been written yet.**
+ *
+ * `starts_at` is the exact slot boundary the scheduling engine produced, already
+ * carrying a UTC offset. It goes into POST /appointments verbatim — the same
+ * rule as SlotOut.starts_at, and for the same reason.
+ */
+export interface AppointmentProposal {
+  pet_id: number;
+  pet_name: string;
+  vet_id: number;
+  vet_name: string;
+  starts_at: string;
+  ends_at: string;
+  reason: string | null;
+}
+
+/** A cancellation the assistant suggests. Confirming calls the normal endpoint. */
+export interface CancellationProposal {
+  appointment_id: number;
+  pet_id: number;
+  pet_name: string;
+  vet_name: string;
+  starts_at: string;
+  ends_at: string;
+  reason: string | null;
+}
+
+/** `kind` discriminates, exactly as the `proposal` event and `payload` do. */
+export type ProposalEnvelope =
+  | { kind: 'appointment'; proposal: AppointmentProposal }
+  | { kind: 'cancellation'; proposal: CancellationProposal };
+
+/**
+ * What an assistant row carries besides its prose. Null when the turn used no
+ * tools and proposed nothing — the server stores null rather than empty lists.
+ */
+export interface ChatMessagePayload {
+  proposals?: ProposalEnvelope[];
+  tools_used?: string[];
+}
+
+export interface ChatMessageOut {
+  id: number;
+  role: ChatRole;
+  content: string;
+  payload: ChatMessagePayload | null;
+  created_at: string;
+}
+
+export interface ConversationOut {
+  id: number;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetailOut extends ConversationOut {
+  messages: ChatMessageOut[];
+}
+
+/** POST /chat body. Sending anything else is a 422 (`extra="forbid"`). */
+export interface ChatRequest {
+  message: string;
+  conversation_id?: number;
+}
+
+/**
+ * One `data:` frame from POST /chat.
+ *
+ * `tool_start.label` is server-supplied and human-readable ("Checking
+ * availability…") so the client keeps no name→label table of its own.
+ */
+export type ChatEvent =
+  | { type: 'token'; text: string }
+  | { type: 'tool_start'; name: string; label: string }
+  | { type: 'tool_end'; name: string }
+  | ({ type: 'proposal' } & ProposalEnvelope)
+  | { type: 'done'; conversation_id: number; message_id: number }
+  | { type: 'error'; detail: string };
