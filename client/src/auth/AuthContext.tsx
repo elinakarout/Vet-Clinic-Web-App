@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import * as authApi from '../api/auth';
+import { clearActiveConversations } from '../api/chat';
 import { setToken, setUnauthorizedHandler } from '../api/client';
 import { AuthContext } from './authContext';
 import type { AuthState } from './authContext';
@@ -30,8 +31,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       if (expired) setSessionExpired(true);
       // Otherwise the next person to sign in on this browser briefly sees the
-      // previous user's pets from the cache.
+      // previous user's pets from the cache — or reopens their chat thread.
       queryClient.clear();
+      clearActiveConversations();
     },
     [queryClient],
   );

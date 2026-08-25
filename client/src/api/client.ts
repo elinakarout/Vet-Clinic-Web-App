@@ -186,3 +186,128 @@ export async function apiFetch<T>(
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
+
+// --- Streaming (POST /chat) ----------------------------------------------
+
+export interface StreamOptions {
+  /** Serialised as JSON, like `apiFetch`'s `body`. */
+  body: unknown;
+  /** Aborting stops the reply mid-flight — the panel's Stop button. */
+  signal?: AbortSignal;
+  /** Called once per `data:` frame, in order. Parsing is the caller's job. */
+  onEvent: (event: unknown) => void;
+}
+
+/**
+ * The second choke point: a POST whose reply arrives as Server-Sent Events.
+ *
+ * `apiFetch` cannot do this — it awaits `response.json()`, which means waiting
+ * for the last token before showing the first. This shares everything that
+ * makes `apiFetch` the only way to reach the server (bearer header, `ApiError`,
+ * the single 401 handler) and differs only after the headers arrive.
+ *
+ * `EventSource` is not an option: it can neither send an `Authorization` header
+ * nor POST a body. That is why this exists rather than three lines of browser
+ * API.
+ *
+ * Everything the server can refuse — a 401, a 403 on someone else's thread, a
+ * 422, the 429 rate limit, the 503 for an unconfigured key — is raised *before*
+ * the stream starts and therefore lands here as a real `ApiError` with a status
+ * the UI can branch on. The one failure that cannot be hoisted, the model
+ * provider dying mid-reply, arrives as an `error` event inside a 200 and is the
+ * caller's to notice.
+ */
+export async function apiStream(
+  path: string,
+  options: StreamOptions,
+): Promise<void> {
+  const { body, signal, onEvent } = options;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(path), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new ApiError(
+      0,
+      'Could not reach the clinic server. Check your connection and try again.',
+    );
+  }
+
+  if (response.status === 401) {
+    onUnauthorized?.();
+    throw new ApiError(401, 'Your session has expired. Please sign in again.');
+  }
+
+  if (!response.ok) {
+    throw new ApiError(response.status, await readError(response));
+  }
+
+  if (response.body === null) {
+    // No streaming body: fall back to reading it whole rather than showing
+    // nothing. The reply arrives all at once, which is worse but not broken.
+    for (const event of parseFrames(await response.text())) onEvent(event);
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // A frame ends at a blank line. Anything after the last one is a partial
+      // frame — a token can be split across two network chunks — and waits here
+      // until the rest of it arrives.
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? '';
+      for (const event of parseFrames(frames.join('\n\n'))) onEvent(event);
+    }
+    buffer += decoder.decode();
+    for (const event of parseFrames(buffer)) onEvent(event);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * SSE text -> the JSON objects in its `data:` lines.
+ *
+ * Comment lines (`: keep-alive`) and any other field (`event:`, `id:`) are
+ * skipped: this endpoint sends one JSON object per frame and nothing else. A
+ * frame that will not parse is dropped rather than thrown — half a reply on
+ * screen is better than an exception replacing it.
+ */
+function parseFrames(chunk: string): unknown[] {
+  const events: unknown[] = [];
+  for (const frame of chunk.split(/\r?\n\r?\n/)) {
+    const data = frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+    if (data === '') continue;
+    try {
+      events.push(JSON.parse(data));
+    } catch {
+      continue;
+    }
+  }
+  return events;
+}
