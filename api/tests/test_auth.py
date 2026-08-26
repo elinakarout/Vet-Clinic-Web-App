@@ -335,3 +335,100 @@ def test_email_is_case_insensitive(api_client):
 
     # And the same address in a third casing is still a duplicate.
     assert _register(api_client, email="FOO@EXAMPLE.TEST").status_code == 409
+
+
+# ===========================================================================
+# Login rate limiting (Phase 9)
+#
+# Phase 9's QA pass fired fifteen consecutive wrong passwords at a live server
+# and got fifteen 401s, so an offline guessing loop was bounded only by bcrypt's
+# cost factor. These tests pin the replacement.
+# ===========================================================================
+
+
+def _bad_login(api_client, email="client@example.test", password="wrongwrong"):
+    return api_client.post(
+        "/auth/login", data={"username": email, "password": password}
+    )
+
+
+def test_repeated_failed_logins_are_eventually_throttled(api_client, db_session, monkeypatch):
+    """The point of the whole feature: guessing cannot run unbounded."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 3)
+    _register(api_client, email="ratelimited@example.test", password="correct1234")
+
+    codes = [
+        _bad_login(api_client, "ratelimited@example.test").status_code for _ in range(5)
+    ]
+    assert codes[:3] == [401, 401, 401], codes
+    assert codes[3:] == [429, 429], codes
+
+
+def test_the_throttle_tells_the_caller_when_to_come_back(api_client, monkeypatch):
+    """A 429 without Retry-After leaves a client guessing, so assert the header."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 1)
+    _register(api_client, email="retry@example.test", password="correct1234")
+
+    assert _bad_login(api_client, "retry@example.test").status_code == 401
+    blocked = _bad_login(api_client, "retry@example.test")
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) > 0
+    # It must not say whether the account exists.
+    assert "password" not in blocked.json()["detail"].lower()
+
+
+def test_a_correct_password_clears_the_penalty(api_client, monkeypatch):
+    """Two typos then a success must not leave the next sign-in throttled."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 3)
+    _register(api_client, email="typo@example.test", password="correct1234")
+
+    assert _bad_login(api_client, "typo@example.test").status_code == 401
+    assert _bad_login(api_client, "typo@example.test").status_code == 401
+    good = api_client.post(
+        "/auth/login",
+        data={"username": "typo@example.test", "password": "correct1234"},
+    )
+    assert good.status_code == 200, good.text
+
+    # The bucket was cleared, so the full budget is available again.
+    assert _bad_login(api_client, "typo@example.test").status_code == 401
+    assert _bad_login(api_client, "typo@example.test").status_code == 401
+    assert _bad_login(api_client, "typo@example.test").status_code == 401
+    assert _bad_login(api_client, "typo@example.test").status_code == 429
+
+
+def test_throttling_one_account_does_not_lock_out_another(api_client, monkeypatch):
+    """Keying on the e-mail alone would let anyone lock a known user out."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 2)
+    _register(api_client, email="victim@example.test", password="correct1234")
+    _register(api_client, email="bystander@example.test", password="correct1234")
+
+    for _ in range(3):
+        _bad_login(api_client, "victim@example.test")
+    assert _bad_login(api_client, "victim@example.test").status_code == 429
+
+    # The bystander shares the caller's address but not their bucket, and can
+    # still sign in with the right password.
+    good = api_client.post(
+        "/auth/login",
+        data={"username": "bystander@example.test", "password": "correct1234"},
+    )
+    assert good.status_code == 200, good.text
+
+
+def test_an_unknown_address_is_throttled_too(api_client, monkeypatch):
+    """Otherwise user enumeration by brute force stays free."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 2)
+    codes = [
+        _bad_login(api_client, "nobody@example.test").status_code for _ in range(4)
+    ]
+    assert codes == [401, 401, 429, 429], codes
+
+
+def test_the_limit_can_be_switched_off(api_client, monkeypatch):
+    """0 disables it -- how a local REPL or a load test turns throttling off."""
+    monkeypatch.setattr(settings, "login_rate_limit_per_minute", 0)
+    codes = [
+        _bad_login(api_client, "nobody@example.test").status_code for _ in range(12)
+    ]
+    assert set(codes) == {401}, codes

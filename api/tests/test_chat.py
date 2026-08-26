@@ -4,7 +4,7 @@
 ``httpx.MockTransport`` serving scripted SSE, which is the same decision Phase 6
 made when it injected a fake embedding function: what is under test is the
 plumbing -- who a tool can see, how deltas are merged, what gets persisted --
-not whether Gemini is any good. Model *behaviour* is checked against
+not whether the model is any good. Model *behaviour* is checked against
 PROJECT_PLAN.md section 9's manual QA checklist, not by asserting exact strings.
 
 Five tiers, cheapest first:
@@ -33,7 +33,7 @@ from app.chat import client as model_client
 from app.chat.agent import load_history, run_chat
 from app.chat.prompts import EMERGENCY_SIGNS, build_system_prompt
 from app.chat.tools import build_tools
-from app.config import settings
+from app.config import Settings, settings
 from app.models import (
     Appointment,
     AppointmentStatus,
@@ -123,7 +123,7 @@ def fake_model(monkeypatch):
             return httpx.Response(200, content=sse(text_chunk("(no script left)")))
         return httpx.Response(200, content=recorder.responses.pop(0))
 
-    monkeypatch.setattr(settings, "google_ai_studio_api_key", "test-key")
+    _set_only_key(monkeypatch, "test-key")
     model_client.set_client(httpx.Client(transport=httpx.MockTransport(handler)))
     reset_rate_limits()
     try:
@@ -131,6 +131,19 @@ def fake_model(monkeypatch):
     finally:
         model_client.set_client(None)
         reset_rate_limits()
+
+
+
+def _set_only_key(monkeypatch, key: str) -> None:
+    """Give the wire client a usable key, whatever the developer's .env holds.
+
+    Without this a test that never sets a key still passes on a machine with a
+    real NVIDIA_API_KEY in .env and fails on a machine without one -- a test
+    that reads ambient configuration. The helper survives from when there were
+    two key fields to pin; one field is left as a function so the tests below
+    keep saying what they mean.
+    """
+    monkeypatch.setattr(settings, "nvidia_api_key", key)
 
 
 # ===========================================================================
@@ -492,12 +505,12 @@ def test_a_tool_that_raises_becomes_a_sentence(db_session, seeded_db, monkeypatc
 # ===========================================================================
 
 
-def _drain(monkeypatch, body: bytes, status: int = 200):
-    monkeypatch.setattr(settings, "google_ai_studio_api_key", "test-key")
+def _drain(monkeypatch, body: bytes, status: int = 200, error_body: dict | None = None):
+    _set_only_key(monkeypatch, "test-key")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if status != 200:
-            return httpx.Response(status, json={"error": {"message": "nope"}})
+            return httpx.Response(status, json=error_body or {"error": {"message": "nope"}})
         return httpx.Response(200, content=body)
 
     model_client.set_client(httpx.Client(transport=httpx.MockTransport(handler)))
@@ -631,16 +644,116 @@ def test_a_429_becomes_ChatRateLimited(monkeypatch):
         _drain(monkeypatch, b"", status=429)
 
 
+def test_a_429_says_try_again_rather_than_repeating_the_provider(monkeypatch):
+    """What a 429 carries is what a pet owner reads.
+
+    routers/chat.py puts ``str(exc)`` straight into the SSE ``error`` event, so
+    a provider's own words go on a pet owner's screen unless something stops
+    them. The body below is a real one, measured against OpenRouter in Phase 7:
+    ``message`` is the useless "Provider returned error", the real sentence
+    hides in ``metadata.raw``, and that sentence advises the reader to add a
+    provider key and links to an account settings page. Kept as a fixture after
+    the move to NIM because the shape is what any gateway is allowed to send,
+    and the rule it pins -- the user is told to try again, nothing else -- does
+    not depend on who sent it.
+    """
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "metadata": {
+                "raw": "google/gemma-4-26b-a4b-it:free is temporarily rate-limited "
+                "upstream. Please retry shortly, or add your own key to accumulate "
+                "your rate limits: https://openrouter.ai/settings/integrations",
+                "provider_name": "Google AI Studio",
+            },
+        }
+    }
+    with pytest.raises(model_client.ChatRateLimited) as caught:
+        _drain(monkeypatch, b"", status=429, error_body=body)
+
+    said = str(caught.value)
+    assert "try again" in said.lower()
+    assert "http" not in said.lower()  # no settings link, no provider URL
+    assert "key" not in said.lower()
+
+
+def test_a_nested_provider_error_reaches_the_message_for_a_non_429(monkeypatch):
+    """The other half: for a real failure the provider's words are worth having.
+
+    A gateway that nests them under ``error.metadata.raw`` and leaves
+    ``message`` generic -- OpenRouter did, measured in Phase 7 -- makes reading
+    only ``message`` lose the entire diagnosis. Unlike the 429 above this one
+    goes to the user, because a real failure has no "try again" to offer.
+    """
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "metadata": {"raw": "context length 262144 exceeded by 12 tokens"},
+        }
+    }
+    with pytest.raises(model_client.ChatUnavailable) as caught:
+        _drain(monkeypatch, b"", status=400, error_body=body)
+
+    assert "context length" in str(caught.value)
+
+
 def test_a_500_becomes_ChatUnavailable(monkeypatch):
     with pytest.raises(model_client.ChatUnavailable):
         _drain(monkeypatch, b"", status=500)
 
 
 def test_a_missing_api_key_is_a_config_error(monkeypatch):
-    monkeypatch.setattr(settings, "google_ai_studio_api_key", "")
-    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.setattr(settings, "nvidia_api_key", "")
     with pytest.raises(model_client.ChatConfigError):
         list(model_client.stream_completion(messages=[{"role": "user", "content": "hi"}]))
+
+
+def test_a_key_under_an_undeclared_name_is_read_by_nothing(tmp_path):
+    """The silent failure that cost this project a broken chatbot. (Gateway switch)
+
+    ``Settings`` sets ``extra="ignore"`` so that an unrelated line another tool
+    wrote into the shared .env cannot take the whole app down at import. The
+    price is paid here: a key spelled under any name the class does not declare
+    is not a warning and not an error, it is simply absent, and the first sign
+    of it is a 503 on every POST /chat with nothing in the log to explain why.
+
+    Measured, not hypothetical -- an api/.env carrying ``API_KEY=nvapi-...``
+    instead of ``NVIDIA_API_KEY`` did exactly this. The test exists so the
+    trade-off stays visible: change the field name in config.py and this goes
+    red, which is the moment to remember that every .env in the wild needs
+    editing too.
+    """
+    env = tmp_path / ".env"
+    env.write_text("SECRET_KEY=test-secret\nAPI_KEY=nvapi-not-the-declared-name\n")
+
+    misspelled = Settings(_env_file=str(env))
+    assert misspelled.chat_api_key == ""
+
+    env.write_text("SECRET_KEY=test-secret\nNVIDIA_API_KEY=nvapi-declared\n")
+    correct = Settings(_env_file=str(env))
+    assert correct.chat_api_key == "nvapi-declared"
+
+
+def test_the_authorization_header_carries_the_configured_key(monkeypatch):
+    """The resolved key is what actually goes on the wire, at the configured URL."""
+    monkeypatch.setattr(settings, "nvidia_api_key", "nvapi-configured")
+    monkeypatch.setattr(
+        settings, "chat_base_url", "https://integrate.api.nvidia.com/v1"
+    )
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=sse(text_chunk("hi", "stop")))
+
+    model_client.set_client(httpx.Client(transport=httpx.MockTransport(handler)))
+    try:
+        list(model_client.stream_completion(messages=[{"role": "user", "content": "hi"}]))
+    finally:
+        model_client.set_client(None)
+
+    assert seen[0].headers["Authorization"] == "Bearer nvapi-configured"
+    assert str(seen[0].url) == "https://integrate.api.nvidia.com/v1/chat/completions"
 
 
 # ===========================================================================
@@ -1087,8 +1200,7 @@ def test_an_unexpected_field_is_rejected(api_client, seeded_db, login, fake_mode
 
 
 def test_a_missing_api_key_is_a_503_not_a_broken_stream(api_client, seeded_db, login, monkeypatch):
-    monkeypatch.setattr(settings, "google_ai_studio_api_key", "")
-    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.setattr(settings, "nvidia_api_key", "")
     reset_rate_limits()
     headers = login("a@test.local", "a")
 
