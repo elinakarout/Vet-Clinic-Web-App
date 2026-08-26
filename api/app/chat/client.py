@@ -1,11 +1,16 @@
 """The streaming model client used by the /chat router. (Phase 7)
 
-Speaks the OpenAI-compatible ``POST /chat/completions`` that **both** Google AI
-Studio and OpenRouter serve, so ``settings.chat_base_url`` decides the gateway
-and no code changes when it moves. PROJECT_PLAN.md sec 7 assumed the ``anthropic``
-SDK and its tool runner; neither is installed here, so the wire format is handled
-directly on top of ``httpx`` -- already a dependency since Phase 0. See
-PHASE_7.md decisions 1 and 2.
+Speaks the OpenAI-compatible ``POST /chat/completions``, which is what NVIDIA
+NIM serves at ``settings.chat_base_url``. PROJECT_PLAN.md sec 7 assumed the
+``anthropic`` SDK and its tool runner; neither is installed here, so the wire
+format is handled directly on top of ``httpx`` -- already a dependency since
+Phase 0. See PHASE_7.md decisions 1 and 2.
+
+Phase 7 ran this same code against Google AI Studio and OpenRouter, and the
+oddities recorded below were measured against those two. They are kept rather
+than trimmed to the current gateway: they are what an OpenAI-compatible endpoint
+is *allowed* to do, and every one of them was found by a live run that an
+offline suite had already passed.
 
 **Synchronous on purpose.** Everything else in this codebase uses sync
 SQLAlchemy, and the tool calls in agent.py do real database work. An ``async``
@@ -190,7 +195,16 @@ def _build_payload(
 
 
 def _raise_for_error_body(response: httpx.Response) -> None:
-    """Turn a non-200 into the right exception, with the provider's own words."""
+    """Turn a non-200 into the right exception.
+
+    The provider's own words go to the **log**; what the exception carries is
+    what routers/chat.py puts on a pet owner's screen, so the two are not the
+    same string. The ``error.metadata.raw`` unwrapping is kept from Phase 7's
+    OpenRouter measurements: a gateway that answers with a generic
+    ``message`` = "Provider returned error" and buries the real complaint one
+    level down is not unique to OpenRouter, and reading only ``message`` there
+    loses the entire diagnosis.
+    """
     try:
         body = response.read().decode("utf-8", "replace")
     except Exception:  # pragma: no cover - body already consumed
@@ -198,14 +212,26 @@ def _raise_for_error_body(response: httpx.Response) -> None:
     detail = body[:400]
     try:
         parsed = json.loads(body)
-        if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
-            detail = str(parsed["error"].get("message") or detail)
-    except (json.JSONDecodeError, TypeError):
+        error = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(error, dict):
+            detail = str(error.get("message") or detail)
+            # OpenRouter nests the provider's actual complaint one level down.
+            raw = (error.get("metadata") or {}).get("raw")
+            if isinstance(raw, str) and raw and raw not in detail:
+                detail = f"{detail} ({raw[:300]})"
+    except (json.JSONDecodeError, AttributeError, TypeError):
         pass
 
     logger.warning("Chat provider returned %s: %s", response.status_code, detail)
     if response.status_code == 429:
-        raise ChatRateLimited(detail or "The assistant is rate limited right now.")
+        # Deliberately not `detail`: a 429 is transient and the only useful
+        # instruction is "try again". The provider's own wording is often about
+        # quota and account credit, which is useful to whoever runs the clinic
+        # and meaningless to whoever is asking about their cat -- see
+        # CLAUDE.md's AI layer section.
+        raise ChatRateLimited(
+            "The assistant is busy right now. Please try again in a moment."
+        )
     raise ChatUnavailable(detail or f"The assistant returned HTTP {response.status_code}.")
 
 
@@ -228,8 +254,10 @@ def stream_completion(
     api_key = settings.chat_api_key
     if not api_key:
         raise ChatConfigError(
-            "No chat API key is configured. Set GOOGLE_AI_STUDIO_API_KEY (or "
-            "OPENROUTER_API_KEY) in api/.env."
+            "No chat API key is configured. Set NVIDIA_API_KEY in api/.env "
+            f"(CHAT_BASE_URL points at {settings.chat_base_url}). The name has "
+            "to be exactly that: config.py ignores keys it does not declare, so "
+            "a line spelled API_KEY is read by nothing and lands here."
         )
 
     url = settings.chat_base_url.rstrip("/") + "/chat/completions"

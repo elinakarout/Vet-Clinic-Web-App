@@ -1,5 +1,8 @@
 """Reads .env into a typed Settings object, used throughout the app."""
 
+from pathlib import Path
+
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,11 +11,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         # A .env is a shared file -- other tools put their own keys in it. Without
-        # this, one unrelated line (an OPENROUTER_API_KEY, say) makes Settings()
-        # raise at import and takes down the app, alembic and the whole test
-        # suite at once. Note this is the opposite of the deliberate
-        # extra="forbid" on the request schemas: there, an unexpected field is an
-        # attacker smuggling "role": "ADMIN"; here it is somebody else's config.
+        # this, one unrelated line makes Settings() raise at import and takes
+        # down the app, alembic and the whole test suite at once. Note this is
+        # the opposite of the deliberate extra="forbid" on the request schemas:
+        # there, an unexpected field is an attacker smuggling "role": "ADMIN";
+        # here it is somebody else's config.
+        #
+        # **The cost is that a key spelled wrong is read by nothing, silently.**
+        # Measured: a .env carrying `API_KEY=nvapi-...` instead of
+        # NVIDIA_API_KEY produced no warning anywhere and a 503 on every
+        # POST /chat, because no field here is named `api_key`. Only the names
+        # declared below are read. tests/test_chat.py pins this behaviour so the
+        # trade-off stays visible rather than being rediscovered.
         extra="ignore",
     )
 
@@ -59,26 +69,32 @@ class Settings(BaseSettings):
     # shape -- PHASE_6.md records the numbers and the script that produced them.
     retrieval_min_score: float = 0.35
 
-    # Chat / LLM (Phase 7) -------------------------------------------------
-    # Google AI Studio's OpenAI-compatible endpoint. PROJECT_PLAN.md sec 7 assumed
-    # the anthropic SDK and claude-opus-5; this project runs on Gemini instead --
-    # see PHASE_7.md decision 1. The gateway is a setting rather than a literal
-    # because OpenRouter speaks the identical /chat/completions schema, so moving
-    # between the two is these three lines and no code at all.
-    chat_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
-    # gemini-3.5-flash, not the newer 3.7: the free tier caps 3.7-flash at
-    # **20 requests per day** (measured, PHASE_7.md), and one tool-using chat
-    # turn costs two to four of them. 3.5-flash has a far larger daily allowance
-    # and throttles at 5/minute instead. The quota is per-model, so changing this
-    # line gets a fresh bucket.
-    chat_model: str = "gemini-3.5-flash"
-    # Two names for the same slot, because the two gateways issue different keys
-    # and .env should not have to be rewritten to switch. Resolution order is in
-    # the chat_api_key property below. Note that until these were declared,
-    # extra="ignore" above meant an OPENROUTER_API_KEY line in .env was read by
-    # nothing at all.
-    google_ai_studio_api_key: str = ""
-    openrouter_api_key: str = ""
+    # Chat / LLM (Phase 7, gateway switched Phase 10) -----------------------
+    # NVIDIA NIM's OpenAI-compatible endpoint. PROJECT_PLAN.md sec 7 assumed the
+    # anthropic SDK and claude-opus-5; neither was ever installed -- PHASE_7.md
+    # decision 1. The wire format is still the OpenAI /chat/completions shape,
+    # which is what app/chat/client.py speaks.
+    #
+    # **One gateway, in code.** Phase 7 kept Google AI Studio and OpenRouter
+    # side by side and resolved the key from this URL, so switching was three
+    # .env lines. That was dropped when the project moved to NIM: pointing this
+    # somewhere else now means editing chat_api_key below as well. The reason
+    # for the move is quota -- OpenRouter's free tier is ~50 requests per DAY
+    # across all free ids and one tool-using turn spends two to five of them,
+    # which is not enough to test a booking flow through.
+    chat_base_url: str = "https://integrate.api.nvidia.com/v1"
+    # Chosen by measurement, not reputation -- api/.env.example carries the full
+    # table and the three gates every candidate has to clear. Of eight NIM ids
+    # tried, this is the only one that cleared all three: it quoted the price
+    # and hours out of the knowledge base verbatim, reached propose_appointment,
+    # and short-circuited the chocolate/seizures prompt without inventing a
+    # phone number. It is slow (30-65s a turn) and spends a tool iteration
+    # freely; openai/gpt-oss-20b is ten times faster and is the documented
+    # fallback, at the cost of missing a price that is in the knowledge base.
+    chat_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    # Named for the vendor, and the name matters: extra="ignore" above means a
+    # key under any other name is read by nothing at all.
+    nvidia_api_key: str = ""
     chat_max_tokens: int = 2048
     # Low, not zero. This is a booking assistant quoting prices and policy out of
     # a knowledge base; invention is the failure mode, not dullness.
@@ -95,10 +111,19 @@ class Settings(BaseSettings):
     # leaves room without letting a confused model loop until the bill notices.
     chat_max_tool_iterations: int = 6
     chat_request_timeout_seconds: float = 90.0
-    # Per user, per process. Deliberately crude -- Phase 9 owns real rate
-    # limiting; this exists so a re-render loop in the frontend cannot burn a
-    # day's free-tier quota before anyone notices.
+    # Per user, per process. Deliberately crude; see services/ratelimit.py for
+    # what this does and does not protect. It exists so a re-render loop in the
+    # frontend cannot burn a day's free-tier quota before anyone notices.
     chat_rate_limit_per_minute: int = 10
+
+    # Failed logins per minute, counted per (client address, e-mail) pair.
+    # Phase 9's QA pass measured fifteen consecutive wrong passwords all
+    # answering 401, so an offline guessing loop was bounded only by bcrypt.
+    # Only *failures* count and a success clears the bucket, so a person who
+    # mistypes twice is never locked out of their own account. Keying on the
+    # pair rather than the e-mail alone matters: keying on the e-mail alone
+    # lets anyone lock a known user out by guessing badly on their behalf.
+    login_rate_limit_per_minute: int = 10
     # The knowledge base says "the clinic" and gives no phone number anywhere, on
     # purpose. The system prompt must not invent either, so both are settings and
     # the defaults stay vague.
@@ -109,14 +134,69 @@ class Settings(BaseSettings):
 
     @property
     def chat_api_key(self) -> str:
-        """The key for whichever gateway chat_base_url points at.
+        """The key for the one gateway this app talks to.
 
-        Google AI Studio first because that is the default base URL. Falling
-        through to OpenRouter means a .env that already has one key works without
-        being edited -- and an empty string here is what routers/chat.py turns
-        into a clean 503 instead of a 401 from the provider.
+        A property rather than a plain field because both readers --
+        routers/chat.py's 503 check and chat/client.py's Authorization header --
+        depend on the contract that an unset key is the empty string and never
+        None. That empty string is what becomes a clean 503 from POST /chat
+        instead of a 401 out of the provider.
+
+        Phase 7 resolved this across two gateways by inspecting chat_base_url.
+        That went away with the move to NIM (see chat_base_url above); if a
+        second gateway ever comes back, this is where it goes.
         """
-        return self.google_ai_studio_api_key or self.openrouter_api_key
+        return self.nvidia_api_key
 
 
-settings = Settings()
+def _load_settings() -> "Settings":
+    """Build Settings, turning a config mistake into a sentence. (Phase 9)
+
+    Phase 9's QA pass ran a script from the repo root instead of api/ and got a
+    twelve-line pydantic traceback ending in `secret_key Field required`, which
+    says nothing about the actual mistake: .env is looked up relative to the
+    working directory, so nothing was found. `raise SystemExit` rather than a
+    re-raise because there is no caller who can recover from this -- the process
+    cannot start -- and a traceback here only buries the one line that helps.
+    """
+    try:
+        return Settings()
+    except ValidationError as exc:
+        missing = [
+            ".".join(str(p) for p in err["loc"])
+            for err in exc.errors()
+            if err["type"] == "missing"
+        ]
+        env_path = Path(".env").resolve()
+        lines = [
+            "",
+            "Configuration error: this app cannot start.",
+            "",
+        ]
+        if missing:
+            lines.append(
+                "  Missing required setting(s): " + ", ".join(sorted(missing))
+            )
+        else:
+            for err in exc.errors():
+                loc = ".".join(str(p) for p in err["loc"])
+                lines.append(f"  {loc}: {err['msg']}")
+        lines += [
+            "",
+            f"  Looked for a .env file at: {env_path}"
+            + ("" if env_path.exists() else "  (this file does not exist)"),
+            f"  Working directory:         {Path.cwd()}",
+            "",
+            "  The .env path is relative to the working directory, so every",
+            "  command here is run from the api/ directory. If you are in the",
+            "  repository root, `cd api` first.",
+            "",
+            "  Starting from nothing:  cp api/.env.example api/.env",
+            "  then set SECRET_KEY (python -c "
+            "'import secrets; print(secrets.token_urlsafe(48))').",
+            "",
+        ]
+        raise SystemExit("\n".join(lines)) from None
+
+
+settings = _load_settings()

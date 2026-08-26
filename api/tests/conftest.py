@@ -153,3 +153,20 @@ def login(api_client):
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
     return _login
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limit():
+    """Give every test a fresh login bucket. (Phase 9)
+
+    The limiter added in Phase 9 counts failed logins in a process-global dict,
+    so without this the suite throttles itself: test_auth.py alone submits well
+    over ten wrong passwords, and every test after the tenth would see a 429
+    instead of the 401 it asserts. Autouse because the trap is invisible -- a
+    test that never mentions rate limiting is exactly the one that breaks.
+    """
+    from app.routers.auth import reset_login_attempts
+
+    reset_login_attempts()
+    yield
+    reset_login_attempts()

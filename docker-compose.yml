@@ -3,9 +3,18 @@ services:
     build: ./api
     ports:
       - "8000:8000"
+    # Migrate before serving. Without this the stack comes up healthy and then
+    # 500s every request with "no such table: users" -- see scripts/start.sh.
+    command: ["sh", "scripts/start.sh"]
     volumes:
       - ./api:/app
       - api-data:/app/data
+      # Nested on purpose, and it must stay below api-data: the volume above
+      # masks ./api/data, which is where fetch_external.py writes the FDA pages.
+      # Without this line the container's knowledge base is the 7 clinic files
+      # only -- Phase 9 measured 7 documents / 54 chunks in Docker against
+      # 12 / 117 on the host, with nothing reporting the difference.
+      - ./api/data/knowledge:/app/data/knowledge
       - hf-cache:/root/.cache/huggingface
       # Chroma's ONNX embedder unpacks here, NOT into hf-cache. Without this
       # volume every container restart re-downloads ~80 MB (Phase 6).

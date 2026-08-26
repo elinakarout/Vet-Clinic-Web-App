@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-from collections import defaultdict, deque
 from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -40,6 +38,7 @@ from app.schemas.chat import (
     ConversationDetailOut,
     ConversationOut,
 )
+from app.services.ratelimit import SlidingWindow
 
 logger = logging.getLogger(__name__)
 
@@ -52,32 +51,27 @@ _UNPROCESSABLE = 422  # see routers/appointments.py for why this is a bare int
 # Rate limiting
 # ---------------------------------------------------------------------------
 #
-# PROJECT_PLAN.md puts rate limiting in Phase 9, and this is not that. It is a
-# sliding window in a dict, so it resets on restart and each uvicorn worker keeps
-# its own count -- with four workers the real limit is four times the setting.
-# It exists because /chat spends money and free-tier quota per call, and a render
-# loop in the frontend can burn a day's allowance before anyone notices. Phase 9
-# replaces it with something shared and durable.
+# Phase 9 moved the window itself into services/ratelimit.py, where
+# /auth/login now shares it, and that module documents what this does and does
+# not protect. It is still process-local: it resets on restart and each uvicorn
+# worker keeps its own count. It exists because /chat spends money and free-tier
+# quota per call, and a render loop in the frontend can burn a day's allowance
+# before anyone notices.
 
-_hits: dict[int, deque[float]] = defaultdict(deque)
+_hits = SlidingWindow()
 
 
 def _rate_limit(current_user: User = Depends(get_current_user)) -> User:
     limit = settings.chat_rate_limit_per_minute
-    if limit <= 0:
-        return current_user
-
-    now = time.monotonic()
-    window = _hits[current_user.id]
-    while window and now - window[0] > 60.0:
-        window.popleft()
-    if len(window) >= limit:
+    retry_after = _hits.is_blocked(current_user.id, limit)
+    if retry_after is not None:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"Too many messages. Please wait a moment -- the assistant accepts "
             f"{limit} messages a minute.",
+            headers={"Retry-After": str(retry_after)},
         )
-    window.append(now)
+    _hits.record(current_user.id)
     return current_user
 
 

@@ -107,5 +107,62 @@ def main() -> None:
     print(f"{report.total_chunks} chunks in SQL, {store.count()} vectors in Chroma.")
 
 
+def _embedder_cache_hint() -> str:
+    """Describe the local ONNX model cache, if it looks incomplete. (Phase 9)
+
+    Chroma downloads all-MiniLM-L6-v2 on first use and unpacks it beside the
+    tarball. Phase 9's QA pass hit a half-written onnx.tar.gz -- 1.6 MB of an
+    80 MB file, left behind by an earlier timeout -- and every retry spent 49
+    seconds re-reading it before dying in an httpx traceback that never named
+    the file. A partial download is the likeliest cause of a timeout here, so
+    say so.
+    """
+    cache = Path.home() / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2"
+    tarball = cache / "onnx.tar.gz"
+    unpacked = cache / "onnx"
+    if unpacked.is_dir():
+        return ""
+    if tarball.exists():
+        mb = tarball.stat().st_size / 1_000_000
+        return (
+            f"\n  The model cache at {cache} looks incomplete:\n"
+            f"  onnx.tar.gz is {mb:.1f} MB (a complete one is ~80 MB) and has not\n"
+            f"  been unpacked. Delete that directory and run this again to\n"
+            f"  re-download it, or copy a working cache in from another machine."
+        )
+    return (
+        f"\n  The embedding model is not cached yet ({cache} is empty), so this\n"
+        f"  run had to download ~80 MB. That is a one-time cost; the retry will\n"
+        f"  resume from whatever completed."
+    )
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit("\nInterrupted. Nothing was left half-written: each file is\ncommitted separately, so re-running picks up where this stopped.") from None
+    except Exception as exc:  # noqa: BLE001 -- a CLI's job is to not show a traceback
+        # Anything that reaches here is a failed run, not a bug the user can
+        # act on from a stack trace. Network faults dominate: the embedder
+        # download is the only step that touches the internet.
+        name = type(exc).__name__
+        detail = str(exc).strip() or "(no message)"
+        message = [
+            "",
+            "Ingest failed.",
+            "",
+            f"  {name}: {detail}",
+        ]
+        if "timeout" in name.lower() or "timeout" in detail.lower() or "connect" in name.lower():
+            hint = _embedder_cache_hint()
+            if hint:
+                message.append(hint)
+        message += [
+            "",
+            "  Nothing is half-written: documents are committed one at a time and",
+            "  ingest is idempotent, so running it again resumes safely.",
+            "  Re-run with --dry-run to chunk everything without touching the store.",
+            "",
+        ]
+        raise SystemExit("\n".join(message)) from None
