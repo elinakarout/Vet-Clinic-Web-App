@@ -130,7 +130,30 @@ class Settings(BaseSettings):
     clinic_name: str = "the clinic"
     clinic_phone: str = ""
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    # Render serves every domain over TLS, so the deployed frontend's origin is
+    # https, not http -- an http entry here silently blocks every browser
+    # request with no server-side error, since CORS rejection happens client
+    # side. localhost:5173 stays in the list so `docker compose up` and the
+    # non-Docker fallback keep working; production overrides this with the
+    # CORS_ORIGINS env var (a JSON array, e.g. '["https://your-app.onrender.com"]')
+    # rather than by editing this default.
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "https://vet-clinic-web-app.onrender.com",
+    ]
+
+    @property
+    def sqlalchemy_database_url(self) -> str:
+        """`database_url` with the `postgres://` scheme normalised.
+
+        SQLAlchemy's psycopg2 dialect stopped accepting the bare `postgres://`
+        scheme in 1.4+; Render's managed Postgres still hands out connection
+        strings written that way. Normalising once here -- rather than in both
+        database.py and alembic/env.py -- keeps the two from drifting.
+        """
+        if self.database_url.startswith("postgres://"):
+            return "postgresql://" + self.database_url[len("postgres://") :]
+        return self.database_url
 
     @property
     def chat_api_key(self) -> str:

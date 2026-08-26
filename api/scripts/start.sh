@@ -22,5 +22,17 @@ if [ "${SEED_ON_START:-0}" = "1" ]; then
   python scripts/seed.py
 fi
 
+# Opt-in for the same reason SEED_ON_START is: a platform with no persistent
+# disk under /app/data (e.g. Render's free web service plan) loses the Chroma
+# store and the knowledge_documents/knowledge_chunks rows on every restart.
+# Re-running is safe -- ingest is idempotent -- but it only re-embeds the
+# tracked api/knowledge/clinic/*.md files, not scripts/fetch_external.py's
+# output, which needs a real filesystem to persist and is too slow (~2.5 min,
+# FDA's robots.txt-respecting rate limit) to redo on every boot.
+if [ "${RUN_INGEST_ON_START:-0}" = "1" ]; then
+  echo "[start] rebuilding the knowledge base (RUN_INGEST_ON_START=1)..."
+  python scripts/ingest_knowledge.py
+fi
+
 echo "[start] launching uvicorn on :8000"
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -1,0 +1,67 @@
+# Render Blueprint. Push this to GitHub, then in the Render dashboard:
+# New + -> Blueprint -> pick this repo. Render reads this file and proposes
+# all three resources below in one go. See the deploy guide for the full
+# walkthrough and the two manual steps this file cannot do for you (setting
+# NVIDIA_API_KEY, and optionally seeding/ingesting via the Render Shell).
+#
+# Render's Blueprint schema does drift between accounts/versions. If the
+# dashboard flags a field here as unrecognised -- most likely `runtime: static`
+# on the client service, or a `plan` value your account doesn't offer -- the
+# dashboard shows you the accepted alternative; swap it in and re-sync.
+
+databases:
+  - name: vet-clinic-db
+    plan: free
+
+services:
+  # --- Backend: api/, built from api/Dockerfile -----------------------------
+  - type: web
+    name: vet-clinic-api
+    runtime: docker
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    # The Dockerfile's own CMD skips migrations -- exactly the Phase 9 bug
+    # ("no such table: users") docker-compose.yml works around with
+    # `command: ["sh", "scripts/start.sh"]`. Render doesn't read compose files,
+    # so the same override has to be repeated here.
+    dockerCommand: sh scripts/start.sh
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vet-clinic-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: '["https://vet-clinic-web-app.onrender.com"]'
+      - key: NVIDIA_API_KEY
+        sync: false # set the real value in the dashboard after first deploy
+      - key: RUN_INGEST_ON_START
+        value: "1" # rebuilds the vector store from api/knowledge/clinic/*.md
+        # on every boot -- cheap and idempotent, but it does NOT run
+        # scripts/fetch_external.py, so the deployed knowledge base is the 7
+        # clinic docs, not the 12 the local/Docker Compose setup has. See the
+        # deploy guide for how to add a persistent disk and the other 5.
+      - key: SEED_ON_START
+        value: "0" # flip to "1" only for a throwaway demo deploy -- this
+        # publishes the seed script's demo passwords to whoever finds the URL
+
+  # --- Frontend: client/, static build --------------------------------------
+  - type: web
+    name: vet-clinic-web-app
+    runtime: static
+    buildCommand: cd client && npm ci && npm run build
+    staticPublishPath: client/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://vet-clinic-api.onrender.com
+      - key: VITE_CLINIC_TIMEZONE
+        value: Asia/Beirut
+    routes:
+      # react-router does client-side routing; without this, refreshing on
+      # e.g. /pets/3 hits Render's static file server directly and 404s.
+      - type: rewrite
+        source: /*
+        destination: /index.html

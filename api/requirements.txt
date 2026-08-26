@@ -19,3 +19,6 @@ chromadb>=1.0,<2       # 1.x for configuration={"hnsw": ...}; see PHASE_6.md
 #                        # of wheels instead of torch's 527 MB + nvidia deps
 httpx
 pytest
+# -binary bundles libpq so the image doesn't need libpq-dev; only used when
+# DATABASE_URL points at Postgres (production) -- SQLite (dev) never imports it.
+psycopg2-binary
