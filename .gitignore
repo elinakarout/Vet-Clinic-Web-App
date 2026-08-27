@@ -25,3 +25,6 @@ dist/
 # ...except the clinic's knowledge base, which is authored source, not a
 # note. Phase 6's RAG store is rebuilt from these files.
 !api/knowledge/clinic/*.md
+# ...and the GitHub-facing overview plus the handover docs it points to.
+!README.md
+!docs/*.md
